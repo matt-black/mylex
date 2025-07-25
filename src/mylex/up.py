@@ -76,6 +76,7 @@ class UpBlock(eqx.Module):
         key1, key2 = jax.random.split(key, 2)
         self.block = ConvBlock(
             num_spatial_dims,
+            False,
             in_channels,
             out_channels,
             kernel_size,

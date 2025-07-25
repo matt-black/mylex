@@ -1,13 +1,3 @@
-"""Self2Self denoising networks.
-
-Self2Self is a denoising architecture that leverages Bernoulli sampling and Dropout to do self-supervised image denoising.
-
-References
----
-[1] Quan, et al "Self2Self With Dropout: Learning Self-Supervised Denoising From Single Image", CVPR 2020
-[2] https://github.com/scut-mingqinchen/Self2Self
-"""
-
 import os
 from collections.abc import Callable
 from typing import List, Sequence, Tuple, Union
@@ -19,33 +9,26 @@ import jax.numpy as jnp
 import numpy
 import optax
 import tifffile
+from calcite.wavelet import morlet
 from jax.tree_util import Partial
 from jaxtyping import Array, PRNGKeyArray, PyTree
 from matplotlib.pyplot import imread as plt_imread
-from parx.conv import PartialConvBlock
 from parx.pool import PartialMaxPool
 from tqdm.auto import trange
 
 from ._types import Scalar
 from .bernoulli import BernoulliMaskMaker
-from .conv import ConvBlock
+from .conv import ScatteringConvBlock, ScatteringPConvBlock
 from .loss import loss_s2s
 from .noise import AdditiveWhiteGaussianNoise
 from .up import UpBlock
 from .util import normalize_0_to_1
 
 
-class UNet(eqx.Module):
-    """UNet architecture that can use partial convolutions in the encoder.
+class WUNet(eqx.Module):
+    """UNet architecture that uses convolution with wavelet filter banks in the encoder."""
 
-    Default parameters are taken from the Self2Self paper, [1].
-
-    References
-    ---
-    [1] Quan, et al "Self2Self With Dropout: Learning Self-Supervised Denoising From Single Image", CVPR 2020
-    """
-
-    encoder_layers: List[ConvBlock | PartialConvBlock]
+    encoder_layers: List[ScatteringConvBlock | ScatteringPConvBlock]
     decoder_layers: List[UpBlock]
     maxpool_layer: PartialMaxPool | eqx.nn.Pool
     output_dropout: eqx.nn.Dropout
@@ -58,21 +41,10 @@ class UNet(eqx.Module):
         num_spatial_dims: int,
         in_channels: int,
         out_channels: int,
-        enc_channels: Sequence[int] = tuple(
-            [
-                48,
-            ]
-            * 6
-        ),
-        dec_channels: Sequence[Union[int, Tuple[int, int]]] = tuple(
-            [
-                96,
-                96,
-                96,
-                96,
-                (64, 32),
-            ]
-        ),
+        filter_bank: Array,
+        trainable_fbank: bool,
+        enc_channels: Sequence[int],
+        dec_channels: Sequence[Union[int, Tuple[int, int]]],
         kernel_size: int | Sequence[int] = 3,
         stride: int | Sequence[int] = 1,
         padding: Union[str, int, Sequence[int], Sequence[Tuple[int, int]]] = 1,
@@ -82,10 +54,10 @@ class UNet(eqx.Module):
         padding_mode: str = "ZEROS",
         dtype=None,
         upsampling_mode: str = "linear",
-        activation: str = "leaky_relu",
+        activation: str = "relu",
         output_activation: str = "sigmoid",
         dropout_prob: float = 0.0,
-        partial_convs: bool = True,
+        partial_convs: bool = False,
         *,
         key: PRNGKeyArray,
     ):
@@ -95,6 +67,8 @@ class UNet(eqx.Module):
             num_spatial_dims (int): number of spatial dimensions
             in_channels (int): number of input channels
             out_channels (int): number of output channels
+            filter_bank (Array): wavelet filter bank to use at each layer of encoder.
+            trainable_fbank (bool): whether the weights of the filter bank is trainable.
             key (PRNGKeyArray): a `jax.random.PRNGKey` used to provide randomness for parameter initialization. (Keyword only argument)
             enc_channels (Sequence[int], optional): list of number of channels output at each layer of the encoder. Defaults to [48,]*6.
             dec_channels (Sequence[Union[int,Tuple[int,int]]], optional): list of number of channels output at each layer of the decoder. Tuples can be specified so that the intermediate channel at the block can be specified. Defaults to [96, 96, 96, 96, (64, 32)].
@@ -113,52 +87,43 @@ class UNet(eqx.Module):
             partial_convs (bool, optional): use partial convolutions in encoder. Defaults to True.
         """
         self.partial_convs = partial_convs
-        if len(dec_channels) != len(enc_channels) - 1:
-            raise ValueError("decoder must be 1 element shorter than encoder")
-        keys = jax.random.split(key, len(enc_channels) + len(dec_channels) + 1)
+        n_enc_layers = len(dec_channels) + 1
         # setup the encoding pathway
+        enc_keys = jax.random.split(key, n_enc_layers + 1)
         self.encoder_layers = list()
         for in_chan, out_chan, ekey in zip(
-            [in_channels] + list(enc_channels[:-1]),
-            enc_channels,
-            keys[: len(enc_channels)],
+            [in_channels] + list(enc_channels[:-1]), enc_channels, enc_keys[:-1]
         ):
             single_conv = in_chan == in_channels
             self.encoder_layers.append(
-                PartialConvBlock(
-                    num_spatial_dims,
+                ScatteringPConvBlock(
                     single_conv,
                     in_chan,
                     out_chan,
-                    kernel_size,
-                    stride,
-                    padding,
-                    dilation,
-                    groups,
+                    filter_bank,
+                    None,
+                    trainable_fbank,
+                    trainable_fbank,
                     use_bias,
                     padding_mode,
-                    dtype,
-                    fft_conv=False,
-                    activation=activation,
-                    dropout_prob=0,
+                    activation,
+                    0.0,
+                    True,
                     key=ekey,
                 )
                 if partial_convs
-                else ConvBlock(
-                    num_spatial_dims,
+                else ScatteringConvBlock(
                     single_conv,
                     in_chan,
                     out_chan,
-                    kernel_size,
-                    stride,
-                    padding,
-                    dilation,
-                    groups,
+                    filter_bank,
+                    None,
+                    trainable_fbank,
+                    trainable_fbank,
                     use_bias,
                     padding_mode,
-                    dtype,
-                    activation=activation,
-                    dropout_prob=0,
+                    activation,
+                    0.0,
                     key=ekey,
                 )
             )
@@ -175,9 +140,7 @@ class UNet(eqx.Module):
                 concat_chan, [enc_channels[-1]] + list(dec_channels)
             )
         ]
-        dec_keys = keys[
-            len(enc_channels) : len(enc_channels) + len(dec_channels)
-        ]
+        dec_keys = jax.random.split(enc_keys[-1], len(dec_channels) + 1)
         self.decoder_layers = list()
         for in_chan, out_chan, dkey in zip(dec_in_chan, dec_channels, dec_keys):
             self.decoder_layers.append(
@@ -200,9 +163,7 @@ class UNet(eqx.Module):
                 )
             )
         # setup the output convolution & activations
-        self.output_dropout = eqx.nn.Dropout(dropout_prob)
-        # the last decoder channels could be a single int or a tuple of ints,
-        # account for this here to make sure an int gets passed to the Conv layer
+        self.output_dropout = eqx.nn.Dropout(p=dropout_prob)
         if isinstance(dec_channels[-1], int):
             last_dec = dec_channels[-1]
         else:
@@ -219,7 +180,7 @@ class UNet(eqx.Module):
             use_bias,
             padding_mode,
             dtype,
-            key=keys[-1],
+            key=dec_keys[-1],
         )
         if output_activation == "sigmoid":
             self.output_activation = jax.nn.sigmoid
@@ -253,7 +214,7 @@ class UNet(eqx.Module):
         return self.output_activation(self.output_conv(x))
 
     def _call_notpart(self, x: Array, key: PRNGKeyArray) -> Array:
-        # encoder layers
+        # encoder layers/encoder
         encoder_depth = len(self.encoder_layers)
         intermediate_encodings = list()
         enc_keys = jax.random.split(key, encoder_depth + 1)
@@ -263,7 +224,7 @@ class UNet(eqx.Module):
             x = encoder_layer(x, enc_keys[idx])  # type: ignore
             if idx < encoder_depth - 1:
                 x = self.maxpool_layer(x)  # type: ignore
-        # decoder
+        # decoder layers/decoder
         dec_keys = jax.random.split(enc_keys[-1], len(self.decoder_layers) + 1)
         for decoder_layer, dkey in zip(self.decoder_layers, dec_keys[:-1]):
             x = decoder_layer(x, intermediate_encodings.pop(-1), dkey)
@@ -272,7 +233,7 @@ class UNet(eqx.Module):
         return self.output_activation(self.output_conv(x))
 
     def __call__(self, x: Array, mask: Array, key: PRNGKeyArray) -> Array:
-        """Generate predictions for input array and its mask (forward pass through UNet).
+        """Generate predictions for input array and its mask (forward pass).
 
         Args:
             x (Array): input array
@@ -289,7 +250,7 @@ class UNet(eqx.Module):
 
 
 def train(
-    model: UNet,
+    model: WUNet,
     image: Array,
     optim: optax.GradientTransformation,
     masker: BernoulliMaskMaker,
@@ -297,11 +258,11 @@ def train(
     augment_flips: bool,
     verbose: bool,
     key: PRNGKeyArray,
-) -> Tuple[UNet, numpy.ndarray]:
-    """Train a UNet model to denoise input images, using the method described in Self2Self.
+) -> Tuple[WUNet, numpy.ndarray]:
+    """Train a model to denoise input images, using the method described in Self2Self.
 
     Args:
-        model (UNet): the model, a UNet
+        model (WUNet): the model, a WUNet
         image (Array): noisy image, to be trained to denoise.
         optim (optax.GradientTransformation): the optimizer (from `optax`)
         masker (BernoulliMaskMaker): module to do the Bernoulli masking of the input array.
@@ -311,22 +272,22 @@ def train(
         key (PRNGKeyArray): PRNG key
 
     Returns:
-        UNet: trained model
+        WUNet: trained model
     """
     opt_state = optim.init(eqx.filter(model, eqx.is_array))
 
     def _loss(
-        model: UNet, image: Array, mask: Array, key: PRNGKeyArray
+        model: WUNet, image: Array, mask: Array, key: PRNGKeyArray
     ) -> Scalar:
-        pred = jax.vmap(model)(image * mask, mask, key)
+        pred = jax.vmap(model)(jnp.multiply(image, mask), mask, key)
         return loss_s2s(image, pred, mask)
 
     _loss = eqx.filter_jit(_loss)
 
     @eqx.filter_jit
     def _make_step(
-        model: UNet, x: Array, opt_state: PyTree, key: PRNGKeyArray
-    ) -> Tuple[UNet, optax.OptState, Scalar]:
+        model: WUNet, x: Array, opt_state: PyTree, key: PRNGKeyArray
+    ) -> Tuple[WUNet, optax.OptState, Scalar]:
         key_mask, key_loss = jax.random.split(key, 2)
         # batch-ify the keys
         key_mask = jax.random.split(key_mask, x.shape[0])
@@ -349,8 +310,7 @@ def train(
         return model, opt_state, loss_val
 
     losses = numpy.zeros((steps,), dtype=numpy.float32)
-
-    prog_bar = trange(steps, desc="S2S Training") if verbose else range(steps)
+    prog_bar = trange(steps, desc="S2W Training") if verbose else range(steps)
     for step_idx in prog_bar:
         _, key = jax.random.split(key)
         model, opt_state, train_loss = _make_step(model, image, opt_state, key)
@@ -361,7 +321,7 @@ def train(
 
 
 def test(
-    model: UNet,
+    model: WUNet,
     image: Array,
     masker: BernoulliMaskMaker,
     n_samples: int = 50,
@@ -372,7 +332,7 @@ def test(
     """Generate model prediction by sampling and averaging many masked instances (see [1] for description).
 
     Args:
-        model (UNet): the (presumably trained) model
+        model (WUNet): the (presumably trained) model
         image (Array): image to denoise
         masker (BernoulliMaskMaker): masking module for Bernoulli-sampled masks
         key (PRNGKeyArray): PRNG key
@@ -414,9 +374,9 @@ def command_line_interface() -> int:
 
 
 @command_line_interface.command("train")
-@click.option("--img-path", default=None, help="Path to image to denoise")
+@click.option("--img-path", default=None, help="path to image to denoise")
 @click.option(
-    "--num-iter", default=1, help="Number of steps to take during training"
+    "--num-iter", default=1, help="# of steps to take during training"
 )
 @click.option(
     "--learning-rate", default=0.01, help="Learning rate of Adam optimizer"
@@ -426,6 +386,13 @@ def command_line_interface() -> int:
     default=0.3,
     help="Probability of a pixel being masked at each iteration",
 )
+@click.option(
+    "--num-stds", default=2, help="# of std. devs wide to make filters"
+)
+@click.option(
+    "--num-orientations", default=8, help="# of orientations in the filter bank"
+)
+@click.option("--trainable-filters", is_flag=True)
 @click.option("--mask-indep-channels", is_flag=True)
 @click.option("--augment-flips", is_flag=True)
 @click.option("--prng-seed", default=1, help="PRNG Seed")
@@ -437,6 +404,9 @@ def do_training(
     num_iter: int,
     learning_rate: float,
     prob_mask: float,
+    num_stds: float,
+    num_orientations: int,
+    trainable_filters: bool,
     mask_indep_channels: bool,
     augment_flips: bool,
     prng_seed: int,
@@ -456,14 +426,27 @@ def do_training(
         in_chan = img.shape[0]
     if not len(img.shape) == 3:
         raise ValueError(
-            "invalid input, image array must be 2 or 3-dimensional"
+            "invalid input, image array must be 2 or 2+1-dimensional"
         )
     img = jax.numpy.expand_dims(jax.numpy.asarray(img), 0)
     img = jax.vmap(normalize_0_to_1, 0, 0)(img)
+    # make the filter bank
+    fbank = morlet.filter_bank_2d_scikit(
+        n_stds=num_stds, n_orientations=num_orientations
+    )
     # initialize the model
     key = jax.random.key(prng_seed)
     model_key, train_key = jax.random.split(key, 2)
-    model = UNet(2, in_chan, in_chan, dropout_prob=0.3, key=model_key)
+    model = WUNet(
+        2,
+        in_chan,
+        in_chan,
+        fbank,
+        trainable_filters,
+        [24, 48, 48, 48, 48],
+        [96, 96, 96, (64, 32)],
+        key=model_key,
+    )
     # initialize the optimizer & masker
     opt = optax.adam(learning_rate)
     bmask = BernoulliMaskMaker(prob_mask, mask_indep_channels)
@@ -495,6 +478,13 @@ def do_training(
     default=0.3,
     help="Probability of a pixel being masked at each iteration",
 )
+@click.option(
+    "--num-stds", default=2, help="# of std. devs wide to make filters"
+)
+@click.option(
+    "--num-orientations", default=8, help="# of orientations in the filter bank"
+)
+@click.option("--trainable-filters", is_flag=True)
 @click.option("--mask-indep-channels", is_flag=True)
 @click.option("--augment-flips", is_flag=True)
 @click.option("--prng-seed", default=1, help="PRNG Seed")
@@ -507,6 +497,9 @@ def do_training_awgn(
     num_iter: int,
     learning_rate: float,
     prob_mask: float,
+    num_stds: float,
+    num_orientations: int,
+    trainable_filters: bool,
     mask_indep_channels: bool,
     augment_flips: bool,
     prng_seed: int,
@@ -543,7 +536,20 @@ def do_training_awgn(
             os.path.join(output_path, "noisy_image.npy"), numpy.asarray(img[0])
         )
     # initialize the model
-    model = UNet(2, in_chan, in_chan, dropout_prob=0.3, key=model_key)
+    fbank = morlet.filter_bank_2d_scikit(
+        n_stds=num_stds, n_orientations=num_orientations
+    )
+    fbank = jnp.concatenate([fbank.real, fbank.imag], axis=0)
+    model = WUNet(
+        2,
+        in_chan,
+        in_chan,
+        fbank,
+        trainable_filters,
+        [32, 48, 48, 48, 48],
+        [96, 96, 96, (64, 32)],
+        key=model_key,
+    )
     # initialize the optimizer & masker
     opt = optax.adam(learning_rate)
     bmask = BernoulliMaskMaker(prob_mask, mask_indep_channels)

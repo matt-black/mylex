@@ -52,3 +52,4 @@ calcite = { git = "https://github.com/matt-black/calcite" }
 
 [project.scripts]
 s2s = "mylex.s2s:command_line_interface"
+s2w = "mylex.s2w:command_line_interface"
