@@ -2,10 +2,9 @@
 
 Self2Self is a denoising architecture that leverages Bernoulli sampling and Dropout to do self-supervised image denoising.
 
-References
----
-[1] Quan, et al "Self2Self With Dropout: Learning Self-Supervised Denoising From Single Image", CVPR 2020
-[2] https://github.com/scut-mingqinchen/Self2Self
+References:
+    [1] Quan, et al "Self2Self With Dropout: Learning Self-Supervised Denoising From Single Image", CVPR 2020
+    [2] https://github.com/scut-mingqinchen/Self2Self
 """
 
 import os
@@ -26,13 +25,13 @@ from parx.conv import PartialConvBlock
 from parx.pool import PartialMaxPool
 from tqdm.auto import trange
 
-from ._types import Scalar
-from .bernoulli import BernoulliMaskMaker
-from .conv import ConvBlock
-from .loss import loss_s2s
-from .noise import AdditiveWhiteGaussianNoise
-from .up import UpBlock
-from .util import normalize_0_to_1
+from .._types import Scalar
+from ..bernoulli import BernoulliMaskMaker
+from ..conv import ConvBlock
+from ..loss import loss_s2s
+from ..noise import AdditiveWhiteGaussianNoise
+from ..up import UpBlock
+from ..util import normalize_0_to_1
 
 
 class UNet(eqx.Module):
@@ -40,9 +39,8 @@ class UNet(eqx.Module):
 
     Default parameters are taken from the Self2Self paper, [1].
 
-    References
-    ---
-    [1] Quan, et al "Self2Self With Dropout: Learning Self-Supervised Denoising From Single Image", CVPR 2020
+    References:
+        [1] Quan, et al "Self2Self With Dropout: Learning Self-Supervised Denoising From Single Image", CVPR 2020
     """
 
     encoder_layers: List[ConvBlock | PartialConvBlock]

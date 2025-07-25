@@ -16,13 +16,13 @@ from matplotlib.pyplot import imread as plt_imread
 from parx.pool import PartialMaxPool
 from tqdm.auto import trange
 
-from ._types import Scalar
-from .bernoulli import BernoulliMaskMaker
-from .conv import ScatteringConvBlock, ScatteringPConvBlock
-from .loss import loss_s2s
-from .noise import AdditiveWhiteGaussianNoise
-from .up import UpBlock
-from .util import normalize_0_to_1
+from .._types import Scalar
+from ..bernoulli import BernoulliMaskMaker
+from ..conv import ScatteringConvBlock, ScatteringPConvBlock
+from ..loss import loss_s2s
+from ..noise import AdditiveWhiteGaussianNoise
+from ..up import UpBlock
+from ..util import normalize_0_to_1
 
 
 class WUNet(eqx.Module):
