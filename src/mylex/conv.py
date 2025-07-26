@@ -220,11 +220,8 @@ class ConvBlock(eqx.Module):
         return z if self.conv2 is None else self.activation(self.conv2(z))
 
 
-class ScatteringConv(eqx.Module):
-    """A convolution layer used as part of a learnable scattering transform.
-
-    This layer takes in a multi-channel input and applies all of the filters in its filter bank to each of the channels. The output of this is then (# input channels x # filters). This is then convolved with a 1x1 conv kernel (pointwise convolution) to the desired number of output channels. Note that this is similar to a depthwise-separable convolution.
-    """
+class WaveletConv(eqx.Module):
+    """Convolution, similar to a depthwise-separable convolution, using a (possibly fixed) filter bank of wavelets."""
 
     filter_bank: Array
     num_spatial_dims: int = eqx.field(static=True)
@@ -235,29 +232,18 @@ class ScatteringConv(eqx.Module):
         filter_bank: Array,
         in_channels: int,
         out_channels: int,
-        trainable_fbank: bool,
+        trainable: bool,
         use_bias: bool = False,
         padding_mode: str = "ZEROS",
         *,
         key: PRNGKeyArray,
     ):
-        """Initialize the module.
-
-        Args:
-            filter_bank (Array): the wavelet filter bank.
-            in_channels (int): number of input channels.
-            out_channels (int): number of output channels.
-            trainable_fbank (bool): whether the filter bank can be updated during training.
-            key (PRNGKeyArray): PRNG key array.
-            use_bias (bool, optional): use a bias term with the convolution. Defaults to False.
-            padding_mode (str, optional): values used for padding. Defaults to "ZEROS".
-        """
         _, ockey = jax.random.split(key, 2)
         # input filter bank should have size [N,...] where ... are spatial dimensions and N is the number of filters in the filter bank
         # add singleton dimension at axis=1 b/c JAX wants the convolution kernel to be in the form OIHW, and we want each kernel to be applied to each channel
         self.filter_bank = (
             jax.lax.stop_gradient(jnp.expand_dims(filter_bank, 1))
-            if trainable_fbank
+            if trainable
             else jnp.expand_dims(filter_bank, 1)
         )
         num_spatial_dims = len(filter_bank.shape) - 1
@@ -277,6 +263,7 @@ class ScatteringConv(eqx.Module):
         )
 
     def _conv(self, x: Array) -> Array:
+        """Convolves the input, `x`, with the filter bank and return the output."""
         return jax.lax.conv(
             x[None, None, ...],
             self.filter_bank,
@@ -288,26 +275,12 @@ class ScatteringConv(eqx.Module):
         )[0]
 
     def __call__(self, x: Array, key: PRNGKeyArray) -> Array:
-        """Forward pass through the module.
-
-        This applies all the filters in the filter bank to all the channels of the input.
-
-        Args:
-            x (Array): input array
-            key (PRNGKeyArray): PRNG key array.
-
-        Returns:
-            Array: output array
-        """
         y = jnp.reshape(jax.vmap(self._conv, 0, 0)(x), [-1] + list(x.shape[1:]))
         return self.output_conv(y, key=key)
 
 
-class ScatteringPConv(eqx.Module):
-    """A partial convolution layer used as part of a learnable scattering transform.
-
-    This layer takes in a multi-channel input and applies all of the filters in its filter bank to each of the channels. The output of this is then (# input channels x # filters). This is then convolved with a 1x1 conv kernel (pointwise convolution) to the desired number of output channels. Note that this is similar to a depthwise-separable convolution.
-    """
+class WaveletPConv(eqx.Module):
+    """Partial convolution, similar to a depthwise-separable convolution, using a (possibly fixed) filter bank of wavelets."""
 
     pconv: PartialConv
     num_spatial_dims: int = eqx.field(static=True)
@@ -401,15 +374,237 @@ class ScatteringPConv(eqx.Module):
         reshp = [
             -1,
         ] + list(y.shape[2:])
-        return self.output_conv(y.reshape(reshp), mask.reshape(reshp))
+        mask = mask.reshape(reshp)
+        z, mask = self.output_conv(y.reshape(reshp), mask)
+        if self.return_mask:
+            return z, mask
+        else:
+            return z
 
 
-class ScatteringConvBlock(eqx.Module):
+class ScatteringConv(eqx.Module):
+    """A convolution layer used as part of a learnable scattering transform.
+
+    This layer takes in a multi-channel input and applies all of the filters in its filter bank to each of the channels. The output of this is then (# input channels x # filters). This is then convolved with a 1x1 conv kernel (pointwise convolution) to the desired number of output channels. Note that this is similar to a depthwise-separable convolution.
+    """
+
+    filter_bank: Array
+    num_spatial_dims: int = eqx.field(static=True)
+    output_conv: eqx.nn.Conv
+    activation: Callable[[Array], Array]
+
+    def __init__(
+        self,
+        filter_bank: Array,
+        in_channels: int,
+        out_channels: int,
+        trainable_fbank: bool,
+        use_bias: bool = False,
+        padding_mode: str = "ZEROS",
+        activation: str | None = None,
+        *,
+        key: PRNGKeyArray,
+    ):
+        """Initialize the module.
+
+        Args:
+            filter_bank (Array): the wavelet filter bank.
+            in_channels (int): number of input channels.
+            out_channels (int): number of output channels.
+            trainable_fbank (bool): whether the filter bank can be updated during training.
+            key (PRNGKeyArray): PRNG key array.
+            use_bias (bool, optional): use a bias term with the convolution. Defaults to False.
+            padding_mode (str, optional): values used for padding. Defaults to "ZEROS".
+            activation (str, optional): the activation applied after the filter bank convolution, but before the pointwise (1x1) convolution. If None, no activation is applied. Defaults to None.
+        """
+        _, ockey = jax.random.split(key, 2)
+        # input filter bank should have size [N,...] where ... are spatial dimensions and N is the number of filters in the filter bank
+        # add singleton dimension at axis=1 b/c JAX wants the convolution kernel to be in the form OIHW, and we want each kernel to be applied to each channel
+        self.filter_bank = (
+            jax.lax.stop_gradient(jnp.expand_dims(filter_bank, 1))
+            if trainable_fbank
+            else jnp.expand_dims(filter_bank, 1)
+        )
+        num_spatial_dims = len(filter_bank.shape) - 1
+        self.num_spatial_dims = num_spatial_dims
+        num_fbank_chans = filter_bank.shape[0]
+        num_interm_chans = num_fbank_chans * in_channels
+        self.output_conv = eqx.nn.Conv(
+            num_spatial_dims,
+            num_interm_chans,
+            out_channels,
+            1,
+            1,
+            padding="same",
+            use_bias=use_bias,
+            padding_mode=padding_mode,
+            key=ockey,
+        )
+        if activation is None:
+            self.activation = jax.nn.identity
+        else:
+            if activation == "relu":
+                self.activation = jax.nn.relu
+            elif activation == "leaky_relu":
+                self.activation = Partial(jax.nn.leaky_relu, negative_slope=0.1)
+            elif activation == "silu":
+                self.activation = jax.nn.silu
+            else:
+                raise ValueError("invalid activation function")
+
+    def _conv(self, x: Array) -> Array:
+        """Convolves the input, `x`, with the filter bank and return the output."""
+        return jax.lax.conv(
+            x[None, None, ...],
+            self.filter_bank,
+            window_strides=[
+                1,
+            ]
+            * self.num_spatial_dims,
+            padding="same",
+        )[0]
+
+    def __call__(self, x: Array, key: PRNGKeyArray) -> Array:
+        """Forward pass through the module.
+
+        This applies all the filters in the filter bank to all the channels of the input.
+
+        Args:
+            x (Array): input array
+            key (PRNGKeyArray): PRNG key array.
+
+        Returns:
+            Array: output array
+        """
+        y = jnp.reshape(jax.vmap(self._conv, 0, 0)(x), [-1] + list(x.shape[1:]))
+        return self.output_conv(self.activation(y), key=key)
+
+
+class ScatteringPConv(eqx.Module):
+    """A partial convolution layer used as part of a learnable scattering transform.
+
+    This layer takes in a multi-channel input and applies all of the filters in its filter bank to each of the channels. The output of this is then (# input channels x # filters). This is then convolved with a 1x1 conv kernel (pointwise convolution) to the desired number of output channels. Note that this is similar to a depthwise-separable convolution.
+    """
+
+    pconv: PartialConv
+    num_spatial_dims: int = eqx.field(static=True)
+    return_mask: bool = eqx.field(static=True)
+    output_conv: PartialConv
+    activation: Callable[[Array], Array]
+
+    def __init__(
+        self,
+        filter_bank: Array,
+        in_channels: int,
+        out_channels: int,
+        trainable_fbank: bool,
+        use_bias: bool = False,
+        padding_mode: str = "ZEROS",
+        return_mask: bool = False,
+        activation: str | None = None,
+        *,
+        key: PRNGKeyArray,
+    ):
+        """Initialize the module.
+
+        Args:
+            filter_bank (Array): the wavelet filter bank.
+            in_channels (int): number of input channels.
+            out_channels (int): number of output channels.
+            trainable_fbank (bool): whether the filter bank can be updated during training.
+            key (PRNGKeyArray): PRNG key array.
+            use_bias (bool, optional): use a bias term with the convolution. Defaults to False.
+            padding_mode (str, optional): values used for padding. Defaults to "ZEROS".
+            return_mask (bool, optional): whether to return the updated mask along with the new array. Defaults to False.
+        """
+        pkey, ockey = jax.random.split(key, 2)
+        num_spatial_dims = len(filter_bank.shape) - 1
+        self.num_spatial_dims = num_spatial_dims
+        self.return_mask = return_mask
+        num_filts = filter_bank.shape[0]
+        ker_size = filter_bank.shape[1:]
+        interm_chans = num_filts * in_channels
+        self.pconv = PartialConv(
+            num_spatial_dims,
+            in_channels,
+            interm_chans,
+            ker_size,
+            1,
+            "same",
+            1,
+            1,
+            use_bias,
+            padding_mode,
+            None,
+            True,
+            False,
+            # kwargs
+            weight=filter_bank[:, None, ...],
+            fixed=(not trainable_fbank),
+            key=pkey,
+        )
+        self.output_conv = PartialConv(
+            num_spatial_dims,
+            interm_chans,
+            out_channels,
+            1,
+            1,
+            "same",
+            1,
+            1,
+            use_bias,
+            padding_mode,
+            None,
+            return_mask=return_mask,
+            fft_conv=False,
+            key=ockey,
+        )
+        if activation is None:
+            self.activation = jax.nn.identity
+        else:
+            if activation == "relu":
+                self.activation = jax.nn.relu
+            elif activation == "leaky_relu":
+                self.activation = Partial(jax.nn.leaky_relu, negative_slope=0.1)
+            elif activation == "silu":
+                self.activation = jax.nn.silu
+            else:
+                raise ValueError("invalid activation function")
+
+    def __call__(self, x: Array, mask: Array) -> Array | Tuple[Array, Array]:
+        """Forward pass through the module.
+
+        This applies all the filters in the filter bank to all the channels of the input.
+
+        Args:
+            x (Array): input array
+            mask (Array): mask array
+
+        Returns:
+            Array | Tuple[Array, Array]: output array, and possibly the mask.
+        """
+        # vmap over pconv does the vmap over channels so that all filters in the filter bank are applied to all of the input channels
+        y, mask = jax.vmap(self.pconv, (0, 0), (0, 0))(
+            jnp.expand_dims(x, 1),
+            jnp.expand_dims(mask, 1),
+        )
+        reshp = [
+            -1,
+        ] + list(y.shape[2:])
+        mask = mask.reshape(reshp)
+        z, mask = self.output_conv(self.activation(y.reshape(reshp)), mask)
+        if self.return_mask:
+            return z, mask
+        else:
+            return z
+
+
+class WaveletConvBlock(eqx.Module):
     """A block of convolutions using a wavelet filter bank, with dropout."""
 
-    conv1: ScatteringConv
+    conv1: WaveletConv
     dropout: eqx.nn.Dropout
-    conv2: ScatteringConv | None
+    conv2: WaveletConv | None
     activation: Callable[[Array], Array]
 
     def __init__(
@@ -423,7 +618,7 @@ class ScatteringConvBlock(eqx.Module):
         trainable_fbank2: bool,
         use_bias: bool = False,
         padding_mode: str = "ZEROS",
-        activation: str = "relu",
+        activation: str | None = None,
         dropout_prob: float = 0.0,
         *,
         key: PRNGKeyArray,
@@ -450,7 +645,7 @@ class ScatteringConvBlock(eqx.Module):
         key1, key2 = jax.random.split(key, 2)
         if isinstance(out_channels, int):
             out_channels = (out_channels, out_channels)
-        self.conv1 = ScatteringConv(
+        self.conv1 = WaveletConv(
             filter_bank1,
             in_channels,
             out_channels[0],
@@ -462,7 +657,7 @@ class ScatteringConvBlock(eqx.Module):
         if single_conv:
             self.conv2 = None
         else:
-            self.conv2 = ScatteringConv(
+            self.conv2 = WaveletConv(
                 filter_bank2 if filter_bank2 is not None else filter_bank1,
                 out_channels[0],
                 out_channels[1],
@@ -476,12 +671,17 @@ class ScatteringConvBlock(eqx.Module):
         else:
             self.dropout = eqx.nn.Dropout(p=dropout_prob)
 
-        if activation == "leaky_relu":
-            self.activation = Partial(jax.nn.leaky_relu, negative_slope=0.1)
-        elif activation == "relu":
-            self.activation = jax.nn.relu
+        if activation is None:
+            self.activation = jax.nn.identity
         else:
-            raise ValueError("only ReLU and Leaky ReLU are valid")
+            if activation == "relu":
+                self.activation = jax.nn.relu
+            elif activation == "leaky_relu":
+                self.activation = Partial(jax.nn.leaky_relu, negative_slope=0.1)
+            elif activation == "silu":
+                self.activation = jax.nn.silu
+            else:
+                raise ValueError("invalid activation function")
 
     def __call__(self, x: Array, key: PRNGKeyArray) -> Array:
         """Forward pass through the module.
@@ -502,12 +702,12 @@ class ScatteringConvBlock(eqx.Module):
             return self.activation(self.conv2(z, key=k2))
 
 
-class ScatteringPConvBlock(eqx.Module):
+class WaveletPConvBlock(eqx.Module):
     """A block of partial convolutions using a wavelet filter bank, with dropout."""
 
-    conv1: ScatteringPConv
+    conv1: WaveletPConv
     dropout: eqx.nn.Dropout
-    conv2: ScatteringPConv | None
+    conv2: WaveletPConv | None
     activation: Callable[[Array], Array]
     return_mask: bool = eqx.field(static=True)
 
@@ -552,7 +752,7 @@ class ScatteringPConvBlock(eqx.Module):
         self.return_mask = return_mask
         if isinstance(out_channels, int):
             out_channels = (out_channels, out_channels)
-        self.conv1 = ScatteringPConv(
+        self.conv1 = WaveletPConv(
             filter_bank1,
             in_channels,
             out_channels[0],
@@ -565,7 +765,7 @@ class ScatteringPConvBlock(eqx.Module):
         if single_conv:
             self.conv2 = None
         else:
-            self.conv2 = ScatteringPConv(
+            self.conv2 = WaveletPConv(
                 (filter_bank1 if filter_bank2 is None else filter_bank2),
                 out_channels[0],
                 out_channels[1],

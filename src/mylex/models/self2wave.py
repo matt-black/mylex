@@ -18,17 +18,17 @@ from tqdm.auto import trange
 
 from .._types import Scalar
 from ..bernoulli import BernoulliMaskMaker
-from ..conv import ScatteringConvBlock, ScatteringPConvBlock
+from ..conv import WaveletConvBlock, WaveletPConvBlock
 from ..loss import loss_s2s
 from ..noise import AdditiveWhiteGaussianNoise
 from ..up import UpBlock
 from ..util import normalize_0_to_1
 
 
-class WUNet(eqx.Module):
-    """UNet architecture that uses convolution with wavelet filter banks in the encoder."""
+class WNet(eqx.Module):
+    """WNet architecture that uses convolution with wavelet filter banks in the encoder."""
 
-    encoder_layers: List[ScatteringConvBlock | ScatteringPConvBlock]
+    encoder_layers: List[WaveletConvBlock | WaveletPConvBlock]
     decoder_layers: List[UpBlock]
     maxpool_layer: PartialMaxPool | eqx.nn.Pool
     output_dropout: eqx.nn.Dropout
@@ -96,7 +96,7 @@ class WUNet(eqx.Module):
         ):
             single_conv = in_chan == in_channels
             self.encoder_layers.append(
-                ScatteringPConvBlock(
+                WaveletPConvBlock(
                     single_conv,
                     in_chan,
                     out_chan,
@@ -112,7 +112,7 @@ class WUNet(eqx.Module):
                     key=ekey,
                 )
                 if partial_convs
-                else ScatteringConvBlock(
+                else WaveletConvBlock(
                     single_conv,
                     in_chan,
                     out_chan,
@@ -250,7 +250,7 @@ class WUNet(eqx.Module):
 
 
 def train(
-    model: WUNet,
+    model: WNet,
     image: Array,
     optim: optax.GradientTransformation,
     masker: BernoulliMaskMaker,
@@ -258,7 +258,7 @@ def train(
     augment_flips: bool,
     verbose: bool,
     key: PRNGKeyArray,
-) -> Tuple[WUNet, numpy.ndarray]:
+) -> Tuple[WNet, numpy.ndarray]:
     """Train a model to denoise input images, using the method described in Self2Self.
 
     Args:
@@ -277,7 +277,7 @@ def train(
     opt_state = optim.init(eqx.filter(model, eqx.is_array))
 
     def _loss(
-        model: WUNet, image: Array, mask: Array, key: PRNGKeyArray
+        model: WNet, image: Array, mask: Array, key: PRNGKeyArray
     ) -> Scalar:
         pred = jax.vmap(model)(jnp.multiply(image, mask), mask, key)
         return loss_s2s(image, pred, mask)
@@ -286,8 +286,8 @@ def train(
 
     @eqx.filter_jit
     def _make_step(
-        model: WUNet, x: Array, opt_state: PyTree, key: PRNGKeyArray
-    ) -> Tuple[WUNet, optax.OptState, Scalar]:
+        model: WNet, x: Array, opt_state: PyTree, key: PRNGKeyArray
+    ) -> Tuple[WNet, optax.OptState, Scalar]:
         key_mask, key_loss = jax.random.split(key, 2)
         # batch-ify the keys
         key_mask = jax.random.split(key_mask, x.shape[0])
@@ -321,7 +321,7 @@ def train(
 
 
 def test(
-    model: WUNet,
+    model: WNet,
     image: Array,
     masker: BernoulliMaskMaker,
     n_samples: int = 50,
@@ -437,7 +437,7 @@ def do_training(
     # initialize the model
     key = jax.random.key(prng_seed)
     model_key, train_key = jax.random.split(key, 2)
-    model = WUNet(
+    model = WNet(
         2,
         in_chan,
         in_chan,
@@ -540,7 +540,7 @@ def do_training_awgn(
         n_stds=num_stds, n_orientations=num_orientations
     )
     fbank = jnp.concatenate([fbank.real, fbank.imag], axis=0)
-    model = WUNet(
+    model = WNet(
         2,
         in_chan,
         in_chan,
