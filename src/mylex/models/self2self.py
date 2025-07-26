@@ -84,6 +84,7 @@ class UNet(eqx.Module):
         output_activation: str = "sigmoid",
         dropout_prob: float = 0.0,
         partial_convs: bool = True,
+        depthwise_separable: bool = False,
         *,
         key: PRNGKeyArray,
     ):
@@ -109,6 +110,7 @@ class UNet(eqx.Module):
             output_activation (str, optional): activation of output. Defaults to 'sigmoid'.
             dropout_prob (float, optional): dropout probability. Defaults to 0.0.
             partial_convs (bool, optional): use partial convolutions in encoder. Defaults to True.
+            depthwise_separable (bool, optional): use depthwise separable convolutions. Defaults to False.
         """
         self.partial_convs = partial_convs
         if len(dec_channels) != len(enc_channels) - 1:
@@ -139,6 +141,7 @@ class UNet(eqx.Module):
                     fft_conv=False,
                     activation=activation,
                     dropout_prob=0,
+                    depthwise_separable=depthwise_separable,
                     key=ekey,
                 )
                 if partial_convs
@@ -157,6 +160,7 @@ class UNet(eqx.Module):
                     dtype,
                     activation=activation,
                     dropout_prob=0,
+                    depthwise_separable=depthwise_separable,
                     key=ekey,
                 )
             )
@@ -194,6 +198,7 @@ class UNet(eqx.Module):
                     dtype,
                     activation,
                     dropout_prob,
+                    depthwise_separable,
                     key=dkey,
                 )
             )

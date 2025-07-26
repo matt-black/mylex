@@ -1752,7 +1752,7 @@ wheels = [
 [[package]]
 name = "parx"
 version = "0.1.0"
-source = { git = "https://github.com/matt-black/parx#37eccaa647100ab7810d1bd438b3e39607c10557" }
+source = { git = "https://github.com/matt-black/parx#ac37acc39a9f81582abea58fcade99a184182425" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },

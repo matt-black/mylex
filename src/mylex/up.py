@@ -51,6 +51,7 @@ class UpBlock(eqx.Module):
         dtype=None,
         activation: str = "leaky_relu",
         dropout_prob: float = 0.3,
+        depthwise_separable: bool = False,
         *,
         key: PRNGKeyArray,
     ):
@@ -89,6 +90,7 @@ class UpBlock(eqx.Module):
             dtype,
             activation,
             dropout_prob,
+            depthwise_separable,
             key=key1,
         )
         if upsampling_mode == "conv":
