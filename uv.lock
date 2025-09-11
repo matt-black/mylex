@@ -182,7 +182,7 @@ css = [
 [[package]]
 name = "calcite"
 version = "0.1.0"
-source = { git = "https://github.com/matt-black/calcite#44b0e92f7949c9f3ad9f1e093dfd0ed1e97de1d6" }
+source = { git = "https://github.com/matt-black/calcite#8dcf1f5e70e4eca25325f623a9add44d0bdfa8dc" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },
