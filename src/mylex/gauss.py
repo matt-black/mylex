@@ -1,5 +1,6 @@
 import math
 
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 from scipy.special import erfcinv
@@ -114,3 +115,90 @@ def truncation_error_nd_to_1d(epsilon: float, dim: int) -> float:
         float
     """
     return 1 - (1 - epsilon) ** (1 / dim)
+
+
+def point_source_image(
+    sigma: float,
+    amplitudes: Float[Array, " n_pts"],
+    centers: Float[Array, "n_pts 2"],
+    shape_y: int,
+    shape_x: int,
+) -> Float[Array, "{shape_y} {shape_x}"]:
+    grid = jnp.meshgrid(
+        jax.lax.stop_gradient(jnp.arange(shape_x)),
+        jax.lax.stop_gradient(jnp.arange(shape_y)),
+        indexing="xy",
+    )
+
+    def _wrap_gauss(
+        center: Float[Array, " 2"], amplitude: Float[Array, ""]
+    ) -> Float[Array, "{shape_y} {shape_x}"]:
+        return separable_gaussian_nd(
+            2,
+            center,
+            jax.lax.stop_gradient(jnp.array([sigma, sigma])),
+            amplitude,
+            jnp.array([0.0]),
+            *grid,
+        )
+
+    return jnp.sum(
+        jax.vmap(_wrap_gauss, (0, 0), 0)(centers, amplitudes), axis=0
+    )
+
+
+def point_source_volume(
+    sigma_lat: float,
+    sigma_ax: float,
+    amplitudes: Float[Array, " n_pts"],
+    centers: Float[Array, "n_pts 3"],
+    shape_z: int,
+    shape_y: int,
+    shape_x: int,
+) -> Float[Array, "{shape_z} {shape_y} {shape_x}"]:
+    grid = jnp.meshgrid(
+        jax.lax.stop_gradient(jnp.arange(shape_z)),
+        jax.lax.stop_gradient(jnp.arange(shape_x)),
+        jax.lax.stop_gradient(jnp.arange(shape_y)),
+        indexing="xy",
+    )
+
+    def _wrap_gauss(
+        center: Float[Array, " 3"], amplitude: Float[Array, ""]
+    ) -> Float[Array, "{shape_z} {shape_y} {shape_x}"]:
+        return separable_gaussian_nd(
+            3,
+            center,
+            jax.lax.stop_gradient(jnp.array([sigma_ax, sigma_lat, sigma_lat])),
+            amplitude,
+            jnp.array([0.0]),
+            *grid,
+        )
+
+    return jnp.sum(
+        jax.vmap(_wrap_gauss, (0, 0), 0)(centers, amplitudes), axis=0
+    )
+
+
+def separable_gaussian_nd(
+    n_dim: int,
+    cent: Float[Array, " {n_dim}"],
+    sigma: Float[Array, " {n_dim}"],
+    amplitude: Float[Array, ""],
+    background: Float[Array, ""],
+    *coords,
+) -> Array:
+    # setup the broadcasting so that center & sigma will be applied to each coord
+    exp_dims = list(range(1, n_dim + 1))
+    cent = jax.lax.expand_dims(cent, exp_dims)
+    sigma = jax.lax.expand_dims(sigma, exp_dims)
+    # formulate the term inside the exponential -- this is effectively each 1D gaussian on each axis
+    exp_term = jnp.sum(
+        __gauss_term(cent, sigma, jnp.stack(coords, axis=0)), axis=0
+    )
+    # multiply by amplitude, add background
+    return amplitude * jnp.exp(jnp.negative(exp_term)) + background
+
+
+def __gauss_term(c: Float[Array, ""], sx: Float[Array, ""], x: Array) -> Array:
+    return jnp.square(x - c) / (2 * jnp.square(sx))
