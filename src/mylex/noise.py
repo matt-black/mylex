@@ -1,5 +1,7 @@
 import equinox as eqx
 import jax
+import jax.numpy as jnp
+import jax.random as jr
 from jaxtyping import Array, PRNGKeyArray
 
 
@@ -94,3 +96,37 @@ class SaltAndPepperNoise(eqx.Module):
                 self.drop_white(x[0, ...], key=key) * white_renorm, 0
             )
         return jax.numpy.clip((x + m_white) * m_black, min=0, max=self.v_white)
+
+
+@jax.custom_jvp
+def shot_noise(key: PRNGKeyArray, arr: Array) -> Array:
+    """Simulates Poisson shot noise.
+
+    Args:
+        key (PRNGKeyArray): PRNG key
+        arr (Array): array to generate shot noise for
+
+    Notes:
+        The gradient is approximated using the gradient of a Gaussian.
+        Taken from the chromatix library.
+    """
+    return jr.poisson(key, arr, arr.shape).astype(jnp.float32)
+
+
+@shot_noise.defjvp
+def shotnoise_jvp(
+    primals: tuple[Array, Array], tangents: tuple[Array, Array]
+) -> tuple[Array, Array]:
+    key, arr = primals
+    _, arr_dot = tangents
+    primal_out = shot_noise(key, arr)
+    # We define the gradient to be zero if image=0
+    # we just add eta as we multiply by zero later anyway
+    noise_grad = jnp.ones_like(arr) + jnp.divide(
+        jr.normal(key, arr.shape), 2 * jnp.sqrt(arr) + 1e-6
+    )
+    # maximum operation, abs to get rid of -0)
+    tangent_out = jnp.where(
+        primal_out == 0, jnp.array(0.0), arr_dot * jnp.abs(noise_grad)
+    )
+    return primal_out, tangent_out
