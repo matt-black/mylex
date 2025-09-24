@@ -33,14 +33,17 @@ def single_image_frc(
     """
     key, apply_key = jr.split(key, 2)
     im1, im2 = coinflip_split(im, apply_key)
-    rad, val = _single_image_frc_trial(im1, im2, bin_width, pixel_size)
+    trial_fun = Partial(
+        _single_image_frc_trial, bin_width=bin_width, pixel_size=pixel_size
+    )
+    rad, val = trial_fun(im1, im2)
     vals = [val]
     for _ in (
         trange(n_trials, desc="FRC Trials") if verbose else range(n_trials)
     ):
         key, apply_key = jr.split(key, 2)
         im1, im2 = coinflip_split(im, apply_key)
-        _, val = _single_image_frc_trial(im1, im2, bin_width)
+        _, val = trial_fun(im1, im2)
         vals.append(val)
     vals = jnp.stack(vals, axis=0)
     return rad, vals
