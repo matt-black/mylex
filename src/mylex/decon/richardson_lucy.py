@@ -1,12 +1,13 @@
 """Richardson Lucy deconvolution"""
 
+from collections.abc import Callable
 from functools import partial
 
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import convolve
 from jax.tree_util import Partial
-from jaxtyping import Array, Num
+from jaxtyping import Array, Bool, Num
 
 from ..gauss import sampled_gaussian_kernel_1d
 
@@ -66,6 +67,57 @@ def deconvolve_gaussian(
         return _decon_sep3(
             x, psf_ax, psf_lat, psf_lat, bp_ax, bp_lat, bp_lat, num_iter
         )
+
+
+@partial(
+    jax.jit,
+    static_argnums=(
+        1,
+        2,
+        3,
+        4,
+    ),
+)
+def deconvolve_gaussian_callback(
+    x: Array,
+    sigma_lat: float,
+    sigma_ax: float | None,
+    max_iter: int,
+    callback: Callable[[Array], Bool],
+) -> Array:
+    n_dim = 2 if sigma_ax is None else 3
+    psf_lat = sampled_gaussian_kernel_1d(sigma_lat, 1e-8, n_dim)
+    bp_lat = psf_lat[::-1].copy()
+
+    def cond_fun(a: tuple[Array, int]) -> Bool:
+        y, iter_num = a
+        cback_val = callback(y)
+        return jnp.logical_or(cback_val, iter_num < max_iter)
+
+    if sigma_ax is None:
+
+        def body_fun(a: tuple[Array, int]) -> tuple[Array, int]:
+            y, iter_num = a
+            return (
+                _decon_sep2_single_iter(x, y, psf_lat, bp_lat, psf_lat, bp_lat),
+                iter_num + 1,
+            )
+
+    else:
+        psf_ax = sampled_gaussian_kernel_1d(sigma_ax, 1e-8, n_dim)
+        bp_ax = psf_ax[::-1].copy()
+
+        def body_fun(a: tuple[Array, int]) -> tuple[Array, int]:
+            y, iter_num = a
+            return (
+                _decon_sep3_single_iter(
+                    x, y, psf_ax, bp_ax, psf_lat, bp_lat, psf_lat, bp_lat
+                ),
+                iter_num + 1,
+            )
+
+    out, _ = jax.lax.while_loop(cond_fun, body_fun, (x, 0))
+    return out
 
 
 def deconvolve(

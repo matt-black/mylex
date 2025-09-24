@@ -27,6 +27,8 @@ class ModelGaussian(eqx.Module):
     amplitudes: Float[Array, " n"]
     sigma_lat: float = eqx.field(static=True)
     sigma_ax: float | None = eqx.field(static=True)
+    _checkpoint: bool = eqx.field(static=True)
+    _extent: int | None = eqx.field(static=True)
 
     def __init__(
         self,
@@ -34,7 +36,9 @@ class ModelGaussian(eqx.Module):
         centers: Float[Array, "n 3"],
         amplitudes: Float[Array, " n"],
         sigma_lat: float,
-        sigma_ax: float | None = None,
+        sigma_ax: float | None,
+        checkpoint: bool,
+        extent: int | None,
     ) -> None:
         self._array = arr
         self.n_pts = self.centers.shape[0]
@@ -42,6 +46,8 @@ class ModelGaussian(eqx.Module):
         self.amplitudes = amplitudes
         self.sigma_lat = sigma_lat
         self.sigma_ax = sigma_ax
+        self._checkpoint = checkpoint
+        self._extent = extent
 
     @property
     @abstractmethod
@@ -69,15 +75,29 @@ class ImageGaussian(ModelGaussian):
         centers: Float[Array, "n 2"],
         amplitudes: Float[Array, " n"],
         fwhm_lat: float,
+        checkpoint: bool = False,
+        extent: int | None = None,
     ) -> None:
         return super().__init__(
-            img, centers, amplitudes, fwhm_to_sigma(fwhm_lat), None
+            img,
+            centers,
+            amplitudes,
+            fwhm_to_sigma(fwhm_lat),
+            None,
+            checkpoint,
+            extent,
         )
 
     @property
     def point_source_channel(self):
         return point_source_image(
-            self.sigma_lat, self.amplitudes, self.centers, *self._array.shape
+            self.sigma_lat,
+            self.amplitudes,
+            self.centers,
+            self._array.shape[0],
+            self._array.shape[1],
+            self._checkpoint,
+            self._extent,
         )
 
     @property
@@ -85,7 +105,6 @@ class ImageGaussian(ModelGaussian):
         width = math.ceil(self.sigma_lat * 4)
         width = width if width % 2 > 0 else width + 1
         array = separable_gaussian_nd(
-            2,
             jnp.array([width // 2, width // 2], dtype=jnp.float32),
             jnp.array([self.sigma_lat, self.sigma_lat], dtype=jnp.float32),
             jnp.array([1.0], dtype=jnp.float32),
@@ -104,6 +123,8 @@ class VolumeGaussian(ModelGaussian):
         amplitudes: Float[Array, " n"],
         fwhm_lat: float,
         fwhm_ax: float,
+        checkpoint: bool = True,
+        extent: int | None = None,
     ) -> None:
         return super().__init__(
             vol,
@@ -111,6 +132,8 @@ class VolumeGaussian(ModelGaussian):
             amplitudes,
             fwhm_to_sigma(fwhm_lat),
             fwhm_to_sigma(fwhm_ax),
+            checkpoint,
+            extent,
         )
 
     @property
@@ -120,7 +143,11 @@ class VolumeGaussian(ModelGaussian):
             self.sigma_ax,  # pyright: ignore[reportArgumentType]
             self.amplitudes,
             self.centers,
-            *self.volume.shape,
+            self.volume.shape[0],
+            self.volume.shape[1],
+            self.volume.shape[2],
+            self._checkpoint,
+            self._extent,
         )
 
     @property
@@ -132,7 +159,6 @@ class VolumeGaussian(ModelGaussian):
         )
         height = height if height % 2 > 0 else height + 1
         array = separable_gaussian_nd(
-            3,
             jnp.array([height // 2, width // 2, width // 2], dtype=jnp.float32),
             jnp.array(
                 [self.sigma_ax, self.sigma_lat, self.sigma_lat],
