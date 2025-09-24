@@ -170,3 +170,6 @@ data/raw/
 nb/test/
 nb/*.sh
 nb/*.out
+
+.vscode
+sh/

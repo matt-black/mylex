@@ -3,6 +3,7 @@ from itertools import product
 
 import jax.numpy as jnp
 from jaxtyping import Array, Float
+from optax.losses import l2_loss as optax_l2
 
 
 def normalize_0_to_1(x: Array) -> Array:
@@ -33,6 +34,48 @@ def sigma_to_fwhm(sigma: float) -> float:
         float: full width at half maximum
     """
     return 2 * math.sqrt(2 * math.log(2)) * sigma
+
+
+def lateral_resolution_confocal(na: float, _lambda: float = 550) -> float:
+    """Compute the lateral resolution of a confocal microscope with the specified numerical aperture objective and at the specified wavelength.
+
+    Args:
+        na (float): numerical aperture of the objective
+        _lambda (float): wavelength of emission light
+
+    Returns:
+        float
+    """
+    return 0.61 * _lambda / na
+
+
+def axial_resolution_confocal(
+    na: float, _lambda: float = 550, n: float = 1.34
+) -> float:
+    """Compute the axial resolution of a confocal microscope with the specified numerical aperture objective and at the specified wavelength.
+
+    Args:
+        na (float): numerical aperture of the objective
+        _lambda (float): wavelength of emission light
+
+    Returns:
+        float
+    """
+    return 2 * _lambda * n / na**2
+
+
+def poisson_nll(pred: Array, target: Array) -> Array:
+    eps = jnp.finfo(pred.dtype).eps
+    stir = (
+        target * jnp.log(target + eps)
+        - target
+        + 0.5 * jnp.log(2 * jnp.pi * target)
+    )
+    return pred - target * jnp.log(pred + eps) + stir
+
+
+def l2_loss(pred: Array, target: Array) -> Array:
+    return jnp.mean(optax_l2(pred, target))
 
 
 def output_shape_for_transform(
