@@ -41,11 +41,13 @@ __all__ = [
 ]
 
 
+@Partial(jax.jit, static_argnums=(1, 2, 3, 4))
 def multiscale_detection_scalespace(
     x: Float[Array, "z y x"] | Float[Array, "y x"],
     scales: tuple[float, ...],
     sigma_lat: float,
     sigma_ax: float | None = None,
+    axlat_dims: tuple[float, float] | None = None,
 ) -> Float[Array, "s z y x"] | Float[Array, "s y x"]:
     """Construct a scalespace for multi-scale peak detection of fluorescent (assumed bright) objects.
 
@@ -54,6 +56,7 @@ def multiscale_detection_scalespace(
         scales (tuple[float,...]): scales to probe, relative to the specified sigmas.
         sigma_lat (float): lateral resolution, standard deviation.
         sigma_ax (float): axial resolution, standard deviation.
+        axlat_dims (tuple[float,float]|None): dimensions of the axial and lateral size of a voxel (only used if detecting in 3D). if specified, will be used to adjust scale factors to account for axial/lateral asymmetry in resolution.
 
     Returns:
         Float[Array, "s z y x"]|Float[Array, "s y x"]: scale space
@@ -71,12 +74,17 @@ def multiscale_detection_scalespace(
             )
 
     else:
+        if axlat_dims is None:
+            adj_factor = 1.0
+        else:
+            adj_factor = max(axlat_dims[0] / axlat_dims[1], 1.0)
 
         def nj_fun(scl: float) -> Float[Array, "y x"]:
+            sigma_ax_adj = sigma_ax * adj_factor
             return njet(
                 x,
                 "sqrtdetHess",
-                (sigma_ax * scl, sigma_lat * scl, sigma_lat * scl),
+                (sigma_ax_adj, sigma_lat * scl, sigma_lat * scl),
                 method="sampled",
                 normalize=False,
                 epsilon=1e-2,
@@ -85,12 +93,13 @@ def multiscale_detection_scalespace(
     return jnp.negative(jnp.stack([nj_fun(scale) for scale in scales], axis=0))
 
 
-@partial(jax.jit, static_argnums=(1, 2, 3))
+@partial(jax.jit, static_argnums=(1, 2, 3, 4))
 def multiscale_peak_mask(
     x: Float[Array, "z y x"] | Float[Array, "y x"],
     scales: tuple[float, ...],
     sigma_lat: float,
     sigma_ax: float | None = None,
+    axlat_dims: tuple[float, float] | None = None,
 ) -> Int[Array, "z y x"] | Int[Array, "y x"]:
     """Detect peaks at multiple scales by searching for local maxima in scale space.
 
@@ -99,6 +108,7 @@ def multiscale_peak_mask(
         scales (tuple[float,...]): scales to probe, relative to the specified sigmas.
         sigma_lat (float): lateral resolution, standard deviation.
         sigma_ax (float): axial resolution, standard deviation.
+        axlat_dims (tuple[float,float]|None): dimensions of the axial and lateral size of a voxel (only used if detecting in 3D). if specified, will be used to adjust scale factors to account for axial/lateral asymmetry in resolution.
 
     Returns:
         Int[Array, "z y x"]|Int[Array, "y x"]: mask where nonzero values are peaks and values correspond to the detection scale
@@ -106,7 +116,9 @@ def multiscale_peak_mask(
     Notes:
         The output type is a 4 bit unsigned integer (uint4) and thus using more than 15 detection scales (length of `scales` tuple is 17) will cause overflow problems.
     """
-    scsp = multiscale_detection_scalespace(x, scales, sigma_lat, sigma_ax)
+    scsp = multiscale_detection_scalespace(
+        x, scales, sigma_lat, sigma_ax, axlat_dims
+    )
     if sigma_ax is None:
         mask_fun = _local_maxima_3d_mask
         padding = ((1, 1), (1, 1))
@@ -132,10 +144,12 @@ def multiscale_peak_mask(
     return jax.lax.fori_loop(1, len(scales) - 1, body_fun, mask)
 
 
+@Partial(jax.jit, static_argnums=(1, 2, 3))
 def detect_peaks_at_size(
     x: Float[Array, "z y x"] | Float[Array, "y x"],
     sigma_lat: float,
     sigma_ax: float | None = None,
+    axlat_dims: tuple[float, float] | None = None,
 ) -> Int[Array, "n 3"] | Int[Array, "n 2"]:
     """Detect peaks (Gaussian blobs) of the specified width in an array.
 
@@ -145,6 +159,7 @@ def detect_peaks_at_size(
         x (Float[Array, "z y x"]|Float[Array, "y x"]): array to detect peaks in
         sigma_lat (float): lateral resolution as standard deviation
         sigma_ax (float|None): axial resolution as standard deviation
+        axlat_dims (tuple[float,float]|None): dimensions of the axial and lateral size of a voxel (only used if detecting in 3D). if specified, will be used to adjust scale factors to account for axial/lateral asymmetry in resolution.
 
     Returns:
         Int[Array, "n 3"]|Int[Array, "n 2"]: coordinates of the detected peaks.
@@ -152,19 +167,21 @@ def detect_peaks_at_size(
     if sigma_ax is None:
         return _detect_peaks_at_size_2d(x, sigma_lat)
     elif x.ndim == 3:
-        return _detect_peaks_at_size_3d(x, sigma_ax, sigma_lat)
+        return _detect_peaks_at_size_3d(x, sigma_ax, sigma_lat, axlat_dims)
     else:
         raise ValueError("only works for 2D or 3D inputs")
 
 
+@Partial(jax.jit, static_argnums=(1, 2, 3))
 def _detect_peaks_at_size_3d(
     x: Float[Array, "z y x"],
     sigma_ax: float,
     sigma_lat: float,
+    axlat_dims: tuple[float, float] | None = None,
 ) -> Int[Array, "n 3"]:
     # generate the scale space
     scsp = multiscale_detection_scalespace(
-        x, (0.5, 1.0, 2.0), sigma_lat, sigma_ax
+        x, (0.5, 1.0, 2.0), sigma_lat, sigma_ax, axlat_dims
     )
     # detect peaks
     pks = local_maxima_4d(scsp)
@@ -172,6 +189,7 @@ def _detect_peaks_at_size_3d(
     return pks[:, 1:]
 
 
+@Partial(jax.jit, static_argnums=(1,))
 def _detect_peaks_at_size_2d(
     x: Float[Array, "y x"],
     sigma: float,
