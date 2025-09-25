@@ -19,9 +19,11 @@ dependencies = [
     "jaxtyping>=0.3.2",
     "matplotlib>=3.10.3",
     "optax>=0.2.4",
+    "optimistix>=0.0.10",
     "parx",
     "tifffile>=2025.5.26",
     "tqdm>=4.67.1",
+    "winx",
 ]
 
 [build-system]
@@ -53,7 +55,7 @@ profile = "black"
 [tool.uv.sources]
 parx = { git = "https://github.com/matt-black/parx" }
 calcite = { git = "https://github.com/matt-black/calcite" }
-
+winx = { git = "https://github.com/matt-black/winx" }
 
 [project.scripts]
 self2self = "mylex.models.self2self:command_line_interface"

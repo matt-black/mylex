@@ -32,7 +32,6 @@ class _PSFLoss(eqx.Module):
         if fwhm_ax is None:
             # must be 2D
             self.psf = separable_gaussian_nd(
-                2,
                 jnp.array([width // 2, width // 2], dtype=jnp.float32),
                 jnp.array([sigma_lat, sigma_lat], dtype=jnp.float32),
                 jnp.array([1.0], dtype=jnp.float32),
@@ -44,7 +43,6 @@ class _PSFLoss(eqx.Module):
             height = math.ceil(sigma_ax * 3)
             height = height if height % 2 > 0 else height + 1
             self.psf = separable_gaussian_nd(
-                3,
                 jnp.array(
                     [height // 2, width // 2, width // 2], dtype=jnp.float32
                 ),
