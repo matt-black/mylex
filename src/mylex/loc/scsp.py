@@ -77,10 +77,10 @@ def multiscale_detection_scalespace(
         if axlat_dims is None:
             adj_factor = 1.0
         else:
-            adj_factor = max(axlat_dims[0] / axlat_dims[1], 1.0)
+            adj_factor = max(axlat_dims[1] / axlat_dims[0], 1.0)
 
         def nj_fun(scl: float) -> Float[Array, "y x"]:
-            sigma_ax_adj = sigma_ax * adj_factor
+            sigma_ax_adj = sigma_ax * adj_factor * scl
             return njet(
                 x,
                 "sqrtdetHess",

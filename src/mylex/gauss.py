@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import optax
+import optimistix as optx
 from jax.tree_util import Partial
 from jaxtyping import Array, Float, PRNGKeyArray, PyTree
 from scipy.special import erfcinv
@@ -370,6 +371,114 @@ def fit_source_volume(
         )
     background = par_f[-1]
     return src_par, background, losses
+
+
+def fit_3d_axlat_fixed(
+    arr: Float[Array, "z y x"],
+    cent: Float[Array, " 3"],
+    ampl: Float[Array, ""],
+    sigma_ax: float,
+    sigma_lat: float,
+    rtol: float = 1e-5,
+    atol: float = 1e-5,
+    max_steps: int = 500,
+) -> Float[Array, "2 4"]:
+    par_i = jnp.concatenate([cent, ampl[None]], axis=0)
+    sze_z, sze_y, sze_x = arr.shape
+    n_elem = sze_z * sze_y * sze_x
+    z, y, x = jnp.meshgrid(
+        jnp.arange(sze_z), jnp.arange(sze_y), jnp.arange(sze_x), indexing="ij"
+    )
+
+    def loss(params: Float[Array, " 4"], _) -> Float:
+        return (
+            gauss_3d(
+                params[0],
+                params[1],
+                params[2],
+                sigma_ax,
+                sigma_lat,
+                sigma_lat,
+                z,
+                y,
+                x,
+            )
+            * params[3]
+            - arr
+        )
+
+    # do fitting
+    fit_res = optx.least_squares(
+        loss,
+        optx.LevenbergMarquardt(rtol=rtol, atol=atol),
+        par_i,
+        None,
+        max_steps=max_steps,
+        throw=False,
+    )
+    # calculate error
+    resid = fit_res.state.f_info.residual / (n_elem)
+    cost = jnp.sqrt(jnp.sum(jnp.square(resid))) / 4
+    jac = (jax.jacfwd(loss)(fit_res.value, 0)).reshape(-1, 4)
+    inv_hess = jnp.linalg.inv(0.5 * jac.T @ jac)
+    err = jnp.sqrt(jnp.diag(inv_hess * cost))
+    out = jnp.vstack([fit_res.value, err])
+    return out
+
+
+def fit_3d_axlat(
+    arr: Float[Array, "z y x"],
+    cent: Float[Array, " 3"],
+    ampl: Float[Array, ""],
+    sigma_ax: Float[Array, ""],
+    sigma_lat: Float[Array, ""],
+    rtol: float = 1e-5,
+    atol: float = 1e-5,
+    max_steps: int = 500,
+) -> Float[Array, "2 6"]:
+    par_i = jnp.concatenate(
+        [cent, ampl[None], sigma_ax[None], sigma_lat[None]], axis=0
+    )
+    sze_z, sze_y, sze_x = arr.shape
+    n_elem = sze_z * sze_y * sze_x
+    z, y, x = jnp.meshgrid(
+        jnp.arange(sze_z), jnp.arange(sze_y), jnp.arange(sze_x), indexing="ij"
+    )
+
+    def loss(params: Float[Array, " 6"], _) -> Float:
+        return (
+            gauss_3d(
+                params[0],
+                params[1],
+                params[2],
+                params[4],
+                params[5],
+                params[5],
+                z,
+                y,
+                x,
+            )
+            * params[3]
+            - arr
+        )
+
+    # do fitting
+    fit_res = optx.least_squares(
+        loss,
+        optx.LevenbergMarquardt(rtol=rtol, atol=atol),
+        par_i,
+        None,
+        max_steps=max_steps,
+        throw=False,
+    )
+    # calculate error
+    resid = fit_res.state.f_info.residual / (n_elem)
+    cost = jnp.sqrt(jnp.sum(jnp.square(resid))) / 6
+    jac = (jax.jacfwd(loss)(fit_res.value, 0)).reshape(-1, 6)
+    inv_hess = jnp.linalg.inv(0.5 * jac.T @ jac)
+    err = jnp.sqrt(jnp.diag(inv_hess * cost))
+    out = jnp.vstack([fit_res.value, err])
+    return out
 
 
 def separable_gaussian_nd(
